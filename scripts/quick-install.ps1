@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+    [switch]$NoLaunch
+)
+
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -25,14 +30,19 @@ function Find-Python {
         return @{ File = $python.Source; Prefix = "" }
     }
 
-    $candidates = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Programs\Python") -Filter python.exe -Recurse -ErrorAction SilentlyContinue |
-        Sort-Object FullName -Descending
-    if ($candidates) { return @{ File = $candidates[0].FullName; Prefix = "" } }
+    $pythonRoot = Join-Path $env:LOCALAPPDATA "Programs\Python"
+    if (Test-Path $pythonRoot) {
+        $candidates = Get-ChildItem -Path $pythonRoot -Filter python.exe -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending
+        if ($candidates) { return @{ File = $candidates[0].FullName; Prefix = "" } }
+    }
     return $null
 }
 
 $pythonInfo = Find-Python
 if (-not $pythonInfo) {
+    if ($NoLaunch) { throw "Python 3 not found in CI quick-install test." }
+
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
     if (-not $winget) {
         throw "Python 3 n'est pas installe et winget est introuvable. Installe Python 3 puis relance INSTALL-NOVUM.bat."
@@ -43,7 +53,7 @@ if (-not $pythonInfo) {
     if ($LASTEXITCODE -ne 0) { throw "L'installation automatique de Python a echoue." }
     Start-Sleep -Seconds 2
     $pythonInfo = Find-Python
-    if (-not $pythonInfo) { throw "Python a ete installe mais n'a pas ete retrouve. Ferme/reouvre Windows puis relance l'installateur." }
+    if (-not $pythonInfo) { throw "Python a ete installe mais n'a pas ete retrouve. Relance l'installateur." }
 }
 
 New-Item -ItemType Directory -Force -Path $InstallRoot, $StateDir | Out-Null
@@ -115,7 +125,7 @@ if (-not $online) {
 
 $chromeCandidates = @(
     (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-    (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
+    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
     (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
 ) | Where-Object { $_ -and (Test-Path $_) }
 
@@ -128,29 +138,36 @@ if ($chromeCandidates.Count -gt 0) {
 '@
 [System.IO.File]::WriteAllText($LaunchScript, $launch, (New-Object System.Text.UTF8Encoding($false)))
 
-# Desktop shortcut: after first-time Chrome extension loading, this is the only thing to launch.
-$ws = New-Object -ComObject WScript.Shell
-$shortcut = $ws.CreateShortcut($DesktopShortcut)
-$shortcut.TargetPath = "powershell.exe"
-$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LaunchScript`""
-$shortcut.WorkingDirectory = $InstallRoot
-$chromeIcon = @(
-    (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-    (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
-    (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-if ($chromeIcon) { $shortcut.IconLocation = "$chromeIcon,0" }
-$shortcut.Save()
+if (-not $NoLaunch) {
+    # Desktop shortcut: after first-time Chrome extension loading, this is the only thing to launch.
+    $ws = New-Object -ComObject WScript.Shell
+    $shortcut = $ws.CreateShortcut($DesktopShortcut)
+    $shortcut.TargetPath = "powershell.exe"
+    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LaunchScript`""
+    $shortcut.WorkingDirectory = $InstallRoot
+    $chromeIcon = @(
+        (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+        (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
+        (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if ($chromeIcon) { $shortcut.IconLocation = "$chromeIcon,0" }
+    $shortcut.Save()
+}
 
 # Start the local agent now.
 Start-Process -FilePath "wscript.exe" -ArgumentList @("`"$StartAgentVbs`"") -WindowStyle Hidden
-Start-Sleep -Milliseconds 1200
+Start-Sleep -Milliseconds 1500
 try {
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:8765/health" -TimeoutSec 3
     if (-not $health.ok) { throw "health false" }
     Write-Host "Agent NOVUM: OK" -ForegroundColor Green
 } catch {
-    Write-Host "L'agent n'a pas repondu. Le raccourci a quand meme ete cree." -ForegroundColor Yellow
+    throw "L'agent NOVUM n'a pas demarre correctement: $($_.Exception.Message)"
+}
+
+if ($NoLaunch) {
+    Write-Host "Quick-install smoke setup: OK" -ForegroundColor Green
+    return
 }
 
 Set-Clipboard -Value $ExtensionDir
@@ -166,14 +183,14 @@ Write-Host $ExtensionDir -ForegroundColor White
 Write-Host ""
 Write-Host "Apres ca: double-clic sur 'NOVUM ChatGPT' sur ton Bureau = tout se lance." -ForegroundColor Green
 Write-Host ""
-Write-Host "Acces v0.2 rapide: fichiers sur les lecteurs montes + ecriture + terminal en droits utilisateur Windows." -ForegroundColor Yellow
+Write-Host "Acces rapide: fichiers des lecteurs montes + ecriture + terminal en droits utilisateur Windows." -ForegroundColor Yellow
 Write-Host "Ce n'est PAS encore le broker Administrateur/SYSTEM." -ForegroundColor Yellow
 
 Start-Process explorer.exe -ArgumentList @("`"$ExtensionDir`"")
 
 $chromeCandidates2 = @(
     (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-    (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
+    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
     (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
 ) | Where-Object { $_ -and (Test-Path $_) }
 if ($chromeCandidates2.Count -gt 0) {

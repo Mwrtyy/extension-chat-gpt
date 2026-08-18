@@ -3,6 +3,8 @@
   const seen = new Set(JSON.parse(sessionStorage.getItem("novumSeenToolIds") || "[]"));
   let processing = false;
 
+  const PROTOCOL = `You are connected to my Windows PC through the NOVUM PC Bridge Chrome extension.\n\nWhen you need to use my PC, output EXACTLY ONE tool request and nothing else in this format:\n<<<NOVUM_TOOL>>>\n{"id":"unique-id","tool":"TOOL_NAME","args":{}}\n<<<END_NOVUM_TOOL>>>\n\nAfter the extension runs it, I will automatically send you a <<<NOVUM_RESULT>>> message. Continue from that result. Never invent a NOVUM_RESULT. Never claim an action happened unless the returned result says it happened. Use a new unique id for every call.\n\nAvailable tools:\n- pc.status {}\n- fs.list {"path":"C:\\\\Users\\\\...","limit":100}\n- fs.read {"path":"C:\\\\Users\\\\...\\\\file.txt"}\n- fs.write {"path":"C:\\\\Users\\\\...\\\\file.txt","content":"..."}\n- fs.search {"path":"C:\\\\Users\\\\...","query":"name","limit":100}\n- shell.run {"command":"...","cwd":"C:\\\\Users\\\\...","timeout":120}\n- screen.capture {}\n- clipboard.read {}\n- clipboard.write {"text":"..."}\n\nStart by calling pc.status to verify the bridge.`;
+
   function persistSeen() {
     sessionStorage.setItem("novumSeenToolIds", JSON.stringify(Array.from(seen).slice(-500)));
   }
@@ -14,6 +16,16 @@
       document.querySelector('div[contenteditable="true"][data-lexical-editor="true"]') ||
       document.querySelector('div[contenteditable="true"]')
     );
+  }
+
+  async function waitForComposer(timeoutMs = 15000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const composer = getComposer();
+      if (composer) return composer;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error("ChatGPT composer not found");
   }
 
   function setComposerText(text) {
@@ -59,6 +71,7 @@
   }
 
   async function sendText(text) {
+    await waitForComposer();
     setComposerText(text);
     const button = await waitForSendButton();
     button.click();
@@ -87,8 +100,6 @@
     input.files = transfer.files;
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Let ChatGPT ingest the attachment; waitForSendButton below handles slower uploads too.
     await new Promise((resolve) => setTimeout(resolve, 1600));
   }
 
@@ -183,6 +194,27 @@
     }
   }
 
+  async function injectProtocol() {
+    await sendText(PROTOCOL);
+  }
+
+  async function maybeAutoConnect() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("novum") !== "1") return;
+    if (sessionStorage.getItem("novumAutoConnected") === "1") return;
+
+    const settingsResponse = await chrome.runtime.sendMessage({ type: "NOVUM_GET_SETTINGS" });
+    if (!settingsResponse?.settings?.armed || !settingsResponse?.settings?.token) return;
+
+    sessionStorage.setItem("novumAutoConnected", "1");
+    try {
+      await injectProtocol();
+    } catch (error) {
+      sessionStorage.removeItem("novumAutoConnected");
+      console.warn("NOVUM: automatic protocol injection failed", error);
+    }
+  }
+
   const observer = new MutationObserver(() => void scanAssistantMessages());
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   void scanAssistantMessages();
@@ -190,11 +222,11 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type !== "NOVUM_INJECT_PROTOCOL") return;
 
-    const protocol = `You are connected to my Windows PC through the NOVUM PC Bridge Chrome extension.\n\nWhen you need to use my PC, output EXACTLY ONE tool request and nothing else in this format:\n<<<NOVUM_TOOL>>>\n{"id":"unique-id","tool":"TOOL_NAME","args":{}}\n<<<END_NOVUM_TOOL>>>\n\nAfter the extension runs it, I will automatically send you a <<<NOVUM_RESULT>>> message. Continue from that result. Never invent a NOVUM_RESULT. Never claim an action happened unless the returned result says it happened. Use a new unique id for every call.\n\nAvailable tools:\n- pc.status {}\n- fs.list {"path":"C:\\\\Users\\\\...","limit":100}\n- fs.read {"path":"C:\\\\Users\\\\...\\\\file.txt"}\n- fs.write {"path":"C:\\\\Users\\\\...\\\\file.txt","content":"..."}\n- fs.search {"path":"C:\\\\Users\\\\...","query":"name","limit":100}\n- shell.run {"command":"...","cwd":"C:\\\\Users\\\\...","timeout":120}\n- screen.capture {}\n- clipboard.read {}\n- clipboard.write {"text":"..."}\n\nStart by calling pc.status to verify the bridge.`;
-
-    sendText(protocol)
+    injectProtocol()
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   });
+
+  window.setTimeout(() => void maybeAutoConnect(), 1200);
 })();

@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: |
           $env:NOVUM_HOME = Join-Path $env:RUNNER_TEMP 'novum-pc-bridge'
-          Set-Content -Path $env:GITHUB_ENV -Value "NOVUM_HOME=$env:NOVUM_HOME" -Append
+          Add-Content -Path $env:GITHUB_ENV -Value "NOVUM_HOME=$env:NOVUM_HOME"
           $process = Start-Process python -ArgumentList 'agent/novum_agent.py' -PassThru -WindowStyle Hidden
           Set-Content -Path (Join-Path $env:RUNNER_TEMP 'novum-agent.pid') -Value $process.Id
           Start-Sleep -Seconds 2

@@ -11,6 +11,7 @@
     return (
       document.querySelector("#prompt-textarea") ||
       document.querySelector('textarea[placeholder]') ||
+      document.querySelector('div[contenteditable="true"][data-lexical-editor="true"]') ||
       document.querySelector('div[contenteditable="true"]')
     );
   }
@@ -39,6 +40,7 @@
   function findSendButton() {
     return (
       document.querySelector('button[data-testid="send-button"]') ||
+      document.querySelector('button[aria-label="Send prompt"]') ||
       Array.from(document.querySelectorAll("button")).find((button) => {
         const label = (button.getAttribute("aria-label") || "").toLowerCase();
         return label.includes("send") || label.includes("envoyer");
@@ -46,7 +48,7 @@
     );
   }
 
-  async function waitForSendButton(timeoutMs = 8000) {
+  async function waitForSendButton(timeoutMs = 12000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const button = findSendButton();
@@ -69,16 +71,25 @@
     return new File([bytes], filename || "novum-screenshot.png", { type: mime || "image/png" });
   }
 
+  function findFileInput() {
+    return (
+      document.querySelector('input[type="file"][accept*="image"]') ||
+      document.querySelector('input[type="file"][multiple]') ||
+      document.querySelector('input[type="file"]')
+    );
+  }
+
   async function attachImage(base64, mime, filename) {
-    const input = document.querySelector('input[type="file"]');
+    const input = findFileInput();
     if (!input) throw new Error("ChatGPT file input not found for screenshot upload");
     const transfer = new DataTransfer();
     transfer.items.add(base64ToFile(base64, mime, filename));
     input.files = transfer.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
 
-    // Give ChatGPT time to process the attachment before sending the result message.
-    await new Promise((resolve) => setTimeout(resolve, 1400));
+    // Let ChatGPT ingest the attachment; waitForSendButton below handles slower uploads too.
+    await new Promise((resolve) => setTimeout(resolve, 1600));
   }
 
   function compactPayload(payload) {
@@ -116,11 +127,8 @@
       "<<<END_NOVUM_RESULT>>>"
     ].join("\n");
 
-    if (autoSend) {
-      await sendText(text);
-    } else {
-      setComposerText(text);
-    }
+    if (autoSend) await sendText(text);
+    else setComposerText(text);
   }
 
   async function executeCall(call) {
@@ -141,12 +149,23 @@
     await deliverResult(call, response || { ok: false, error: "No response from extension worker" });
   }
 
+  function getAssistantMessages() {
+    const nodes = new Set();
+    for (const selector of [
+      '[data-message-author-role="assistant"]',
+      'article[data-turn="assistant"]',
+      '[data-turn="assistant"]'
+    ]) {
+      for (const node of document.querySelectorAll(selector)) nodes.add(node);
+    }
+    return Array.from(nodes);
+  }
+
   async function scanAssistantMessages() {
     if (processing) return;
     processing = true;
     try {
-      const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-      for (const node of assistantMessages) {
+      for (const node of getAssistantMessages()) {
         const text = node.innerText || node.textContent || "";
         CALL_RE.lastIndex = 0;
         let match;
@@ -164,21 +183,18 @@
     }
   }
 
-  const observer = new MutationObserver(() => {
-    void scanAssistantMessages();
-  });
-
+  const observer = new MutationObserver(() => void scanAssistantMessages());
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   void scanAssistantMessages();
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message?.type === "NOVUM_INJECT_PROTOCOL") {
-      const protocol = `You are connected to my Windows PC through the NOVUM PC Bridge Chrome extension.\n\nWhen you need to use my PC, output EXACTLY ONE tool request and nothing else in this format:\n<<<NOVUM_TOOL>>>\n{"id":"unique-id","tool":"TOOL_NAME","args":{}}\n<<<END_NOVUM_TOOL>>>\n\nAfter the extension runs it, I will automatically send you a <<<NOVUM_RESULT>>> message. Continue from that result. Never invent a NOVUM_RESULT. Never claim an action happened unless the returned result says it happened. Use a new unique id for every call.\n\nAvailable tools:\n- pc.status {}\n- fs.list {"path":"C:\\\\Users\\\\...","limit":100}\n- fs.read {"path":"C:\\\\Users\\\\...\\\\file.txt"}\n- fs.write {"path":"C:\\\\Users\\\\...\\\\file.txt","content":"..."}\n- fs.search {"path":"C:\\\\Users\\\\...","query":"name","limit":100}\n- shell.run {"command":"...","cwd":"C:\\\\Users\\\\...","timeout":120}\n- screen.capture {}\n- clipboard.read {}\n- clipboard.write {"text":"..."}\n\nStart by calling pc.status to verify the bridge.`;
+    if (message?.type !== "NOVUM_INJECT_PROTOCOL") return;
 
-      sendText(protocol)
-        .then(() => sendResponse({ ok: true }))
-        .catch((error) => sendResponse({ ok: false, error: error.message }));
-      return true;
-    }
+    const protocol = `You are connected to my Windows PC through the NOVUM PC Bridge Chrome extension.\n\nWhen you need to use my PC, output EXACTLY ONE tool request and nothing else in this format:\n<<<NOVUM_TOOL>>>\n{"id":"unique-id","tool":"TOOL_NAME","args":{}}\n<<<END_NOVUM_TOOL>>>\n\nAfter the extension runs it, I will automatically send you a <<<NOVUM_RESULT>>> message. Continue from that result. Never invent a NOVUM_RESULT. Never claim an action happened unless the returned result says it happened. Use a new unique id for every call.\n\nAvailable tools:\n- pc.status {}\n- fs.list {"path":"C:\\\\Users\\\\...","limit":100}\n- fs.read {"path":"C:\\\\Users\\\\...\\\\file.txt"}\n- fs.write {"path":"C:\\\\Users\\\\...\\\\file.txt","content":"..."}\n- fs.search {"path":"C:\\\\Users\\\\...","query":"name","limit":100}\n- shell.run {"command":"...","cwd":"C:\\\\Users\\\\...","timeout":120}\n- screen.capture {}\n- clipboard.read {}\n- clipboard.write {"text":"..."}\n\nStart by calling pc.status to verify the bridge.`;
+
+    sendText(protocol)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
   });
 })();

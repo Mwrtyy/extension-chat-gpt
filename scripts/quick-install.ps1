@@ -39,6 +39,25 @@ function Find-Python {
     return $null
 }
 
+function Get-ChromeCandidates {
+    $paths = @()
+
+    if ($env:ProgramFiles) {
+        $paths += (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe")
+    }
+
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    if ($programFilesX86) {
+        $paths += (Join-Path $programFilesX86 "Google\Chrome\Application\chrome.exe")
+    }
+
+    if ($env:LOCALAPPDATA) {
+        $paths += (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+    }
+
+    return @($paths | Where-Object { $_ -and (Test-Path $_) })
+}
+
 $pythonInfo = Find-Python
 if (-not $pythonInfo) {
     if ($NoLaunch) { throw "Python 3 not found in CI quick-install test." }
@@ -97,10 +116,10 @@ $localConfig = "globalThis.NOVUM_BOOTSTRAP_TOKEN = `"$token`";`r`n"
 
 $prefix = [string]$pythonInfo.Prefix
 $pythonFile = [string]$pythonInfo.File
-$command = if ($prefix) {
-    "`"$pythonFile`" $prefix `"$AgentPath`""
+if ($prefix) {
+    $command = "`"$pythonFile`" $prefix `"$AgentPath`""
 } else {
-    "`"$pythonFile`" `"$AgentPath`""
+    $command = "`"$pythonFile`" `"$AgentPath`""
 }
 
 $vbs = @"
@@ -123,11 +142,18 @@ if (-not $online) {
     Start-Sleep -Milliseconds 1200
 }
 
-$chromeCandidates = @(
-    (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
-    (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-) | Where-Object { $_ -and (Test-Path $_) }
+$chromePaths = @()
+if ($env:ProgramFiles) {
+    $chromePaths += (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe")
+}
+$programFilesX86 = ${env:ProgramFiles(x86)}
+if ($programFilesX86) {
+    $chromePaths += (Join-Path $programFilesX86 "Google\Chrome\Application\chrome.exe")
+}
+if ($env:LOCALAPPDATA) {
+    $chromePaths += (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+}
+$chromeCandidates = @($chromePaths | Where-Object { $_ -and (Test-Path $_) })
 
 $url = "https://chatgpt.com/?novum=1"
 if ($chromeCandidates.Count -gt 0) {
@@ -145,12 +171,10 @@ if (-not $NoLaunch) {
     $shortcut.TargetPath = "powershell.exe"
     $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LaunchScript`""
     $shortcut.WorkingDirectory = $InstallRoot
-    $chromeIcon = @(
-        (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-        (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
-        (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-    if ($chromeIcon) { $shortcut.IconLocation = "$chromeIcon,0" }
+    $chromeCandidates = Get-ChromeCandidates
+    if ($chromeCandidates.Count -gt 0) {
+        $shortcut.IconLocation = "$($chromeCandidates[0]),0"
+    }
     $shortcut.Save()
 }
 
@@ -188,11 +212,7 @@ Write-Host "Ce n'est PAS encore le broker Administrateur/SYSTEM." -ForegroundCol
 
 Start-Process explorer.exe -ArgumentList @("`"$ExtensionDir`"")
 
-$chromeCandidates2 = @(
-    (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
-    (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-) | Where-Object { $_ -and (Test-Path $_) }
+$chromeCandidates2 = Get-ChromeCandidates
 if ($chromeCandidates2.Count -gt 0) {
     Start-Process -FilePath $chromeCandidates2[0] -ArgumentList @("chrome://extensions/")
 } else {

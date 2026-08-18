@@ -2,7 +2,7 @@ name: check
 
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main, "feat/**", "fix/**"]
   pull_request:
 
 jobs:
@@ -24,15 +24,15 @@ jobs:
         run: python -m py_compile agent/novum_agent.py
 
       - name: Extension JavaScript syntax
-        shell: pwsh
+        shell: powershell
         run: |
           node --check extension/background.js
           node --check extension/content.js
           node --check extension/popup.js
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8')); console.log('manifest ok')"
 
-      - name: PowerShell syntax
-        shell: pwsh
+      - name: PowerShell 5.1 syntax
+        shell: powershell
         run: |
           $failed = $false
           foreach ($file in @('scripts/install.ps1', 'scripts/smoke-test.ps1', 'scripts/quick-install.ps1')) {
@@ -46,13 +46,10 @@ jobs:
           }
           if ($failed) { exit 1 }
 
-      - name: One-click installer smoke
-        shell: pwsh
-        run: ./scripts/quick-install.ps1 -NoLaunch
-
-      - name: HTTP smoke test
-        shell: pwsh
+      - name: One-click installer and bridge smoke on Windows PowerShell 5.1
+        shell: powershell
         run: |
+          .\scripts\quick-install.ps1 -NoLaunch
           $health = Invoke-RestMethod 'http://127.0.0.1:8765/health'
           if (-not $health.ok) { throw 'health failed' }
           $token = (Get-Content -Raw (Join-Path $env:USERPROFILE '.novum-pc-bridge\token.txt')).Trim()
@@ -67,7 +64,7 @@ jobs:
 
       - name: Stop agent
         if: always()
-        shell: pwsh
+        shell: powershell
         run: |
           Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue |
             ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }

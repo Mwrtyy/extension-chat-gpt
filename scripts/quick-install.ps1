@@ -13,22 +13,25 @@ $ExtensionDir = Join-Path $InstallRoot "extension"
 $AgentPath = Join-Path $AgentDir "novum_agent.py"
 $TokenPath = Join-Path $StateDir "token.txt"
 $ConfigPath = Join-Path $StateDir "config.json"
-$StartAgentVbs = Join-Path $InstallRoot "start-agent.vbs"
 $LaunchScript = Join-Path $InstallRoot "launch-novum.ps1"
 $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "NOVUM ChatGPT.lnk"
+$AgentStdout = Join-Path $StateDir "agent-stdout.log"
+$AgentStderr = Join-Path $StateDir "agent-stderr.log"
 
 Write-Host ""
 Write-Host "NOVUM ChatGPT - installation rapide" -ForegroundColor Cyan
 Write-Host "====================================" -ForegroundColor Cyan
 
 function Find-Python {
-    $py = Get-Command py.exe -ErrorAction SilentlyContinue
-    if ($py) { return @{ File = $py.Source; Prefix = "-3" } }
-
+    # Prefer a concrete python.exe on PATH. This is more reliable than the
+    # Windows py launcher for hidden/background launches and CI environments.
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($python -and $python.Source -notlike "*WindowsApps*") {
         return @{ File = $python.Source; Prefix = "" }
     }
+
+    $py = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($py) { return @{ File = $py.Source; Prefix = "-3" } }
 
     $pythonRoot = Join-Path $env:LOCALAPPDATA "Programs\Python"
     if (Test-Path $pythonRoot) {
@@ -37,6 +40,43 @@ function Find-Python {
         if ($candidates) { return @{ File = $candidates[0].FullName; Prefix = "" } }
     }
     return $null
+}
+
+function Get-ChromeCandidates {
+    $paths = @()
+
+    if ($env:ProgramFiles) {
+        $paths += (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe")
+    }
+
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    if ($programFilesX86) {
+        $paths += (Join-Path $programFilesX86 "Google\Chrome\Application\chrome.exe")
+    }
+
+    if ($env:LOCALAPPDATA) {
+        $paths += (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+    }
+
+    return @($paths | Where-Object { $_ -and (Test-Path $_) })
+}
+
+function Start-NovumAgent {
+    param(
+        [string]$PythonFile,
+        [string]$PythonPrefix,
+        [string]$ScriptPath
+    )
+
+    if ($PythonPrefix) {
+        $argumentString = "$PythonPrefix `"$ScriptPath`""
+    } else {
+        $argumentString = "`"$ScriptPath`""
+    }
+
+    Remove-Item $AgentStdout, $AgentStderr -Force -ErrorAction SilentlyContinue
+    return Start-Process -FilePath $PythonFile -ArgumentList $argumentString -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $AgentStdout -RedirectStandardError $AgentStderr
 }
 
 $pythonInfo = Find-Python
@@ -97,37 +137,47 @@ $localConfig = "globalThis.NOVUM_BOOTSTRAP_TOKEN = `"$token`";`r`n"
 
 $prefix = [string]$pythonInfo.Prefix
 $pythonFile = [string]$pythonInfo.File
-$command = if ($prefix) {
-    "`"$pythonFile`" $prefix `"$AgentPath`""
+if ($prefix) {
+    $agentArgumentString = "$prefix `"$AgentPath`""
 } else {
-    "`"$pythonFile`" `"$AgentPath`""
+    $agentArgumentString = "`"$AgentPath`""
 }
 
-$vbs = @"
-Set shell = CreateObject("WScript.Shell")
-shell.Run "$($command.Replace('"','""'))", 0, False
-"@
-[System.IO.File]::WriteAllText($StartAgentVbs, $vbs, [System.Text.Encoding]::ASCII)
-
-$launch = @'
+# Generate the persistent desktop launcher without VBScript. Using Start-Process
+# directly avoids Windows PowerShell 5.1/VBScript nested-quote issues.
+$pythonFileLiteral = $pythonFile.Replace("'", "''")
+$agentArgsLiteral = $agentArgumentString.Replace("'", "''")
+$launchTemplate = @'
 $ErrorActionPreference = "SilentlyContinue"
-$InstallRoot = Join-Path $env:LOCALAPPDATA "NOVUM-ChatGPT"
-$StartAgentVbs = Join-Path $InstallRoot "start-agent.vbs"
+$pythonFile = '__PYTHON_FILE__'
+$agentArguments = '__AGENT_ARGUMENTS__'
+$StateDir = Join-Path $env:USERPROFILE ".novum-pc-bridge"
+$stdout = Join-Path $StateDir "agent-stdout.log"
+$stderr = Join-Path $StateDir "agent-stderr.log"
 $online = $false
 try {
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:8765/health" -TimeoutSec 1
     $online = [bool]$health.ok
 } catch {}
 if (-not $online) {
-    Start-Process -FilePath "wscript.exe" -ArgumentList @("`"$StartAgentVbs`"") -WindowStyle Hidden
+    Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    Start-Process -FilePath $pythonFile -ArgumentList $agentArguments -WindowStyle Hidden `
+        -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     Start-Sleep -Milliseconds 1200
 }
 
-$chromeCandidates = @(
-    (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
-    (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-) | Where-Object { $_ -and (Test-Path $_) }
+$chromePaths = @()
+if ($env:ProgramFiles) {
+    $chromePaths += (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe")
+}
+$programFilesX86 = ${env:ProgramFiles(x86)}
+if ($programFilesX86) {
+    $chromePaths += (Join-Path $programFilesX86 "Google\Chrome\Application\chrome.exe")
+}
+if ($env:LOCALAPPDATA) {
+    $chromePaths += (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+}
+$chromeCandidates = @($chromePaths | Where-Object { $_ -and (Test-Path $_) })
 
 $url = "https://chatgpt.com/?novum=1"
 if ($chromeCandidates.Count -gt 0) {
@@ -136,6 +186,7 @@ if ($chromeCandidates.Count -gt 0) {
     Start-Process $url
 }
 '@
+$launch = $launchTemplate.Replace('__PYTHON_FILE__', $pythonFileLiteral).Replace('__AGENT_ARGUMENTS__', $agentArgsLiteral)
 [System.IO.File]::WriteAllText($LaunchScript, $launch, (New-Object System.Text.UTF8Encoding($false)))
 
 if (-not $NoLaunch) {
@@ -145,25 +196,42 @@ if (-not $NoLaunch) {
     $shortcut.TargetPath = "powershell.exe"
     $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LaunchScript`""
     $shortcut.WorkingDirectory = $InstallRoot
-    $chromeIcon = @(
-        (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-        (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
-        (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-    if ($chromeIcon) { $shortcut.IconLocation = "$chromeIcon,0" }
+    $chromeCandidates = Get-ChromeCandidates
+    if ($chromeCandidates.Count -gt 0) {
+        $shortcut.IconLocation = "$($chromeCandidates[0]),0"
+    }
     $shortcut.Save()
 }
 
-# Start the local agent now.
-Start-Process -FilePath "wscript.exe" -ArgumentList @("`"$StartAgentVbs`"") -WindowStyle Hidden
-Start-Sleep -Milliseconds 1500
-try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:8765/health" -TimeoutSec 3
-    if (-not $health.ok) { throw "health false" }
-    Write-Host "Agent NOVUM: OK" -ForegroundColor Green
-} catch {
-    throw "L'agent NOVUM n'a pas demarre correctement: $($_.Exception.Message)"
+# Start the local agent now using the same Windows PowerShell-compatible path
+# used by the persistent launcher.
+$agentProcess = Start-NovumAgent -PythonFile $pythonFile -PythonPrefix $prefix -ScriptPath $AgentPath
+Start-Sleep -Milliseconds 1200
+
+$healthOk = $false
+for ($attempt = 0; $attempt -lt 12; $attempt++) {
+    try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:8765/health" -TimeoutSec 1
+        if ($health.ok) {
+            $healthOk = $true
+            break
+        }
+    } catch {}
+    Start-Sleep -Milliseconds 250
 }
+
+if (-not $healthOk) {
+    $detail = ""
+    if ($agentProcess -and $agentProcess.HasExited) {
+        $detail = " Process exited with code $($agentProcess.ExitCode)."
+    }
+    if (Test-Path $AgentStderr) {
+        $stderrText = (Get-Content -Raw $AgentStderr -ErrorAction SilentlyContinue).Trim()
+        if ($stderrText) { $detail += " stderr: $stderrText" }
+    }
+    throw "L'agent NOVUM n'a pas demarre correctement.$detail"
+}
+Write-Host "Agent NOVUM: OK" -ForegroundColor Green
 
 if ($NoLaunch) {
     Write-Host "Quick-install smoke setup: OK" -ForegroundColor Green
@@ -188,11 +256,7 @@ Write-Host "Ce n'est PAS encore le broker Administrateur/SYSTEM." -ForegroundCol
 
 Start-Process explorer.exe -ArgumentList @("`"$ExtensionDir`"")
 
-$chromeCandidates2 = @(
-    (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
-    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe" }),
-    (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
-) | Where-Object { $_ -and (Test-Path $_) }
+$chromeCandidates2 = Get-ChromeCandidates
 if ($chromeCandidates2.Count -gt 0) {
     Start-Process -FilePath $chromeCandidates2[0] -ArgumentList @("chrome://extensions/")
 } else {

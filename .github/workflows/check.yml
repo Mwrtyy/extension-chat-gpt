@@ -46,13 +46,10 @@ jobs:
           }
           if ($failed) { exit 1 }
 
-      - name: One-click installer smoke on Windows PowerShell 5.1
-        shell: powershell
-        run: .\scripts\quick-install.ps1 -NoLaunch
-
-      - name: HTTP smoke test on Windows PowerShell 5.1
+      - name: One-click installer and bridge smoke on Windows PowerShell 5.1
         shell: powershell
         run: |
+          .\scripts\quick-install.ps1 -NoLaunch
           $health = Invoke-RestMethod 'http://127.0.0.1:8765/health'
           if (-not $health.ok) { throw 'health failed' }
           $token = (Get-Content -Raw (Join-Path $env:USERPROFILE '.novum-pc-bridge\token.txt')).Trim()

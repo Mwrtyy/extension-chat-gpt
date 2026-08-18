@@ -1,0 +1,12 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "allowed_roots": [
+    "%USERPROFILE%"
+  ],
+  "allow_write": true,
+  "allow_shell": false,
+  "shell_timeout_seconds": 120,
+  "max_read_bytes": 2000000,
+  "max_list_entries": 500
+}

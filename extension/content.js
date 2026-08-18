@@ -1,5 +1,23 @@
 (() => {
   const CALL_RE = /<<<NOVUM_TOOL>>>\s*([\s\S]*?)\s*<<<END_NOVUM_TOOL>>>/g;
+  const ALLOWED_TOOLS = new Set([
+    "pc.status",
+    "fs.list",
+    "fs.read",
+    "fs.write",
+    "fs.search",
+    "shell.run",
+    "screen.capture",
+    "clipboard.read",
+    "clipboard.write"
+  ]);
+  const TURN_SELECTOR = [
+    "article",
+    '[data-testid^="conversation-turn-"]',
+    '[data-testid*="conversation-turn"]',
+    '[data-scroll-anchor="true"]'
+  ].join(",");
+
   const seen = new Set(JSON.parse(sessionStorage.getItem("novumSeenToolIds") || "[]"));
   let processing = false;
 
@@ -146,6 +164,7 @@
     if (!call || typeof call !== "object") return;
     if (typeof call.id !== "string" || !call.id.trim()) return;
     if (typeof call.tool !== "string" || !call.tool.trim()) return;
+    if (!ALLOWED_TOOLS.has(call.tool)) return;
     if (seen.has(call.id)) return;
 
     seen.add(call.id);
@@ -160,6 +179,38 @@
     await deliverResult(call, response || { ok: false, error: "No response from extension worker" });
   }
 
+  function explicitRole(node) {
+    if (!(node instanceof Element)) return null;
+    if (node.closest('[data-message-author-role="assistant"], [data-turn="assistant"]')) return "assistant";
+    if (node.closest('[data-message-author-role="user"], [data-turn="user"]')) return "user";
+    return null;
+  }
+
+  function classifyTurn(node) {
+    if (!(node instanceof Element)) return null;
+    const direct = explicitRole(node);
+    if (direct) return direct;
+
+    const turn = node.matches(TURN_SELECTOR) ? node : node.closest(TURN_SELECTOR);
+    if (!turn) return null;
+
+    const roleNode = turn.querySelector("[data-message-author-role], [data-turn]");
+    if (roleNode) {
+      const role = (roleNode.getAttribute("data-message-author-role") || roleNode.getAttribute("data-turn") || "").toLowerCase();
+      if (role === "assistant" || role === "user") return role;
+    }
+
+    const labels = Array.from(turn.querySelectorAll('h1,h2,h3,h4,h5,h6,[class*="sr-only"],[aria-label]'))
+      .slice(0, 30)
+      .map((el) => `${el.getAttribute("aria-label") || ""} ${el.textContent || ""}`.trim().toLowerCase())
+      .filter(Boolean)
+      .join("\n");
+
+    if (/\b(you said|vous avez dit|tu as dit|user said)\b/i.test(labels)) return "user";
+    if (/\b(chatgpt said|chatgpt a dit|assistant said)\b/i.test(labels) || /(^|\s)chatgpt($|\s)/i.test(labels)) return "assistant";
+    return null;
+  }
+
   function getAssistantMessages() {
     const nodes = new Set();
     for (const selector of [
@@ -168,6 +219,9 @@
       '[data-turn="assistant"]'
     ]) {
       for (const node of document.querySelectorAll(selector)) nodes.add(node);
+    }
+    for (const turn of document.querySelectorAll(TURN_SELECTOR)) {
+      if (classifyTurn(turn) === "assistant") nodes.add(turn);
     }
     return Array.from(nodes);
   }
@@ -178,6 +232,7 @@
     try {
       for (const node of getAssistantMessages()) {
         const text = node.innerText || node.textContent || "";
+        if (!text.includes("<<<NOVUM_TOOL>>>")) continue;
         CALL_RE.lastIndex = 0;
         let match;
         while ((match = CALL_RE.exec(text)) !== null) {
@@ -218,10 +273,10 @@
   const observer = new MutationObserver(() => void scanAssistantMessages());
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   void scanAssistantMessages();
+  window.setInterval(() => void scanAssistantMessages(), 1200);
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type !== "NOVUM_INJECT_PROTOCOL") return;
-
     injectProtocol()
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));

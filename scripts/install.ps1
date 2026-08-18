@@ -50,7 +50,8 @@ if (-not (Test-Path $ConfigPath)) {
         $config.allow_shell = $true
     }
 
-    $config | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $ConfigPath
+    $json = $config | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($ConfigPath, $json, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Created $ConfigPath" -ForegroundColor Green
 } else {
     Write-Host "Keeping existing config: $ConfigPath" -ForegroundColor DarkGray
@@ -58,7 +59,7 @@ if (-not (Test-Path $ConfigPath)) {
 
 if (-not (Test-Path $TokenPath)) {
     $token = -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Minimum 0 -Maximum 16) })
-    Set-Content -NoNewline -Encoding ASCII $TokenPath $token
+    [System.IO.File]::WriteAllText($TokenPath, $token, [System.Text.Encoding]::ASCII)
 } else {
     $token = (Get-Content -Raw $TokenPath).Trim()
 }
@@ -71,7 +72,7 @@ cd /d "$RepoRoot"
 $pythonCommand "$AgentSource"
 pause
 "@
-Set-Content -Encoding ASCII $Launcher $launcherBody
+[System.IO.File]::WriteAllText($Launcher, $launcherBody, [System.Text.Encoding]::ASCII)
 
 Write-Host ""
 Write-Host "Installed local state in: $StateDir" -ForegroundColor Green

@@ -14,11 +14,28 @@ function setStatus(text, ok = null) {
 }
 
 async function load() {
-  const settings = await chrome.storage.local.get(DEFAULTS);
-  $("baseUrl").value = settings.baseUrl;
-  $("token").value = settings.token;
-  $("armed").checked = settings.armed;
-  $("autoSend").checked = settings.autoSend;
+  // Always wake the service worker first. It imports the installer-generated
+  // local-config.js and bootstraps the pairing token + armed state. Reading
+  // chrome.storage directly here can otherwise race the worker on first load.
+  let settings;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "NOVUM_GET_SETTINGS" });
+    if (!response?.ok || !response.settings) {
+      throw new Error(response?.error || "No settings response");
+    }
+    settings = response.settings;
+  } catch (_) {
+    settings = await chrome.storage.local.get(DEFAULTS);
+  }
+
+  $("baseUrl").value = settings.baseUrl || DEFAULTS.baseUrl;
+  $("token").value = settings.token || "";
+  $("armed").checked = settings.armed === true;
+  $("autoSend").checked = settings.autoSend !== false;
+
+  if (settings.token && settings.armed) {
+    setStatus("Paired automatically — ready.", true);
+  }
 }
 
 async function save() {
@@ -58,7 +75,7 @@ $("inject").addEventListener("click", async () => {
   try {
     const settings = await save();
     if (!settings.armed) throw new Error("Arm tool execution first.");
-    if (!settings.token) throw new Error("Paste the pairing token first.");
+    if (!settings.token) throw new Error("Pairing token unavailable. Re-run the installer or reload the extension.");
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id || !tab.url?.startsWith("https://chatgpt.com/")) {

@@ -1,0 +1,78 @@
+name: check
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+jobs:
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Python syntax
+        run: python -m py_compile agent/novum_agent.py
+
+      - name: Extension JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check extension/background.js
+          node --check extension/content.js
+          node --check extension/popup.js
+          node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8')); console.log('manifest ok')"
+
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in @('scripts/install.ps1', 'scripts/smoke-test.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Start agent
+        shell: pwsh
+        run: |
+          $env:NOVUM_HOME = Join-Path $env:RUNNER_TEMP 'novum-pc-bridge'
+          Set-Content -Path $env:GITHUB_ENV -Value "NOVUM_HOME=$env:NOVUM_HOME" -Append
+          $process = Start-Process python -ArgumentList 'agent/novum_agent.py' -PassThru -WindowStyle Hidden
+          Set-Content -Path (Join-Path $env:RUNNER_TEMP 'novum-agent.pid') -Value $process.Id
+          Start-Sleep -Seconds 2
+
+      - name: HTTP smoke test
+        shell: pwsh
+        run: |
+          $health = Invoke-RestMethod 'http://127.0.0.1:8765/health'
+          if (-not $health.ok) { throw 'health failed' }
+          $token = (Get-Content -Raw (Join-Path $env:NOVUM_HOME 'token.txt')).Trim()
+          $headers = @{ 'X-Novum-Token' = $token }
+          $body = @{ tool = 'pc.status'; args = @{} } | ConvertTo-Json -Depth 5
+          $status = Invoke-RestMethod 'http://127.0.0.1:8765/tool' -Method Post -Headers $headers -ContentType 'application/json' -Body $body
+          if (-not $status.ok) { throw 'pc.status failed' }
+          Write-Host "Agent OK: $($status.result.user)@$($status.result.hostname)"
+
+      - name: Stop agent
+        if: always()
+        shell: pwsh
+        run: |
+          $pidFile = Join-Path $env:RUNNER_TEMP 'novum-agent.pid'
+          if (Test-Path $pidFile) {
+            $agentPid = [int](Get-Content $pidFile)
+            Stop-Process -Id $agentPid -Force -ErrorAction SilentlyContinue
+          }
